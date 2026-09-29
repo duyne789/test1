@@ -1061,6 +1061,27 @@
       font-family:inherit;font-size:11px;font-weight:700;color:#E84A6F;cursor:pointer;
     }
     .chat-quick button:active{background:#FFE0E8}
+    .chat-channels{
+      display:flex;gap:6px;padding:8px 12px 0;overflow-x:auto;-webkit-overflow-scrolling:touch;
+      scrollbar-width:none;
+    }
+    .chat-channels::-webkit-scrollbar{display:none}
+    .chat-ch{
+      flex:none;padding:7px 12px;border-radius:99px;border:1.5px solid #FFE0E8;
+      background:#FFF8F5;font-family:inherit;font-size:11px;font-weight:800;color:#8D6E63;
+      cursor:pointer;white-space:nowrap;transition:all .15s;
+    }
+    .chat-ch.on{
+      background:linear-gradient(135deg,#FF9BB5,#E84A6F);color:#fff;border-color:transparent;
+      box-shadow:0 2px 8px rgba(232,74,111,.3);
+    }
+    .chat-ch .cnt{font-size:9px;opacity:.75;font-weight:700;margin-left:3px}
+    .chat-meta-bar{
+      display:flex;align-items:center;justify-content:space-between;padding:6px 14px 0;
+      font-size:10px;font-weight:700;color:#A1887F;
+    }
+    .chat-meta-bar .ch-name{color:#E84A6F;font-weight:800}
+
 
     /* ===== Giao hàng minigame ===== */
     .deliv-overlay{position:fixed;inset:0;z-index:9999;background:rgba(30,20,15,.6);backdrop-filter:blur(4px);display:flex;align-items:center;justify-content:center;padding:12px}
@@ -6569,22 +6590,53 @@ function setChatNick(n){
   localStorage.setItem('ctChatNick',n);
   return true;
 }
+/** Kênh chat nhóm */
+const CHAT_CHANNELS=[
+  {id:'chung',icon:'🏠',name:'Chung',hint:'Mọi người'},
+  {id:'quan',icon:'🍜',name:'Quán',hint:'Kinh nghiệm bán'},
+  {id:'giaitri',icon:'🎲',name:'Giải trí',hint:'Tài xỉu · bầu cua'},
+  {id:'hoidap',icon:'❓',name:'Hỏi đáp',hint:'Hỏi tip / bug'},
+  {id:'tangau',icon:'😂',name:'Tán gẫu',hint:'Chém gió'},
+];
+let _chatChannel='chung';
+const CH_PREFIX='§CH:';
+function encodeChatMsg(channel,text){
+  const ch=channel||'chung';
+  const t=String(text||'').trim().slice(0,100);
+  if(ch==='chung')return t; // kênh mặc định không prefix (tương thích tin cũ)
+  return CH_PREFIX+ch+'§ '+t;
+}
+function parseChatMsg(raw){
+  const s=String(raw||'');
+  if(s.startsWith(CH_PREFIX)){
+    const i=s.indexOf('§ ',CH_PREFIX.length);
+    if(i>0){
+      const ch=s.slice(CH_PREFIX.length,i);
+      const text=s.slice(i+2);
+      if(CHAT_CHANNELS.some(c=>c.id===ch))return {channel:ch,text};
+    }
+  }
+  return {channel:'chung',text:s};
+}
 async function fetchGlobalChat(limit){
-  limit=limit||40;
+  limit=limit||80;
   if(!SB_OK())return {ok:false,error:'no sb',data:[]};
   const q='/rest/v1/public_chat?select=id,nick,message,created_at&order=created_at.desc&limit='+limit;
   const res=await sbFetch(q,{method:'GET',headers:{'Accept':'application/json'}});
   if(!res.ok)return res;
   const rows=Array.isArray(res.data)?res.data.slice().reverse():[];
+  // gắn channel parse
+  rows.forEach(r=>{const p=parseChatMsg(r.message);r._ch=p.channel;r._text=p.text});
   return {ok:true,data:rows};
 }
-async function sendGlobalChat(message){
+async function sendGlobalChat(message,channel){
   const nick=getChatNick();
   if(!nick)return {ok:false,error:'Cần nickname'};
-  const msg=String(message||'').trim().slice(0,120);
+  const ch=channel||_chatChannel||'chung';
+  const msg=encodeChatMsg(ch,message);
   if(!msg)return {ok:false,error:'Trống'};
   if(!SB_OK())return {ok:false,error:'Chưa cấu hình server'};
-  const body={nick,message:msg};
+  const body={nick,message:msg.slice(0,120)};
   return sbFetch('/rest/v1/public_chat',{
     method:'POST',
     headers:{'Prefer':'return=minimal','Content-Type':'application/json'},
@@ -6601,7 +6653,7 @@ function openGlobalChat(){
   let loading=true;
   let rows=[];
   async function load(){
-    const res=await fetchGlobalChat(50);
+    const res=await fetchGlobalChat(80);
     loading=false;
     if(res.ok)rows=res.data||[];
     else rows=[];
@@ -6609,32 +6661,54 @@ function openGlobalChat(){
   }
   function paint(){
     const nick=getChatNick();
-    const quick=['Chào cả nhà 👋','Quán mình đông quá!','Ai còn nguyên liệu không?','Chúc cả nhà bán chạy 🍜','Hôm nay lời to 💰'];
+    const chInfo=CHAT_CHANNELS.find(c=>c.id===_chatChannel)||CHAT_CHANNELS[0];
+    const quickByCh={
+      chung:['Chào cả nhà 👋','Quán mình đông quá!','Chúc bán chạy 🍜'],
+      quan:['Hôm nay lời to 💰','Thiếu nguyên liệu quá','Nâng cấp gì trước?'],
+      giaitri:['Tài xỉu hôm nay sao?','Ai thắng bầu cua?','Đừng nghiện quá nhé 😅'],
+      hoidap:['Làm sao lên cấp nhanh?','Bug gì vậy mọi người?','Mẹo nhập hàng?'],
+      tangau:['Haha 😂','Trưa nay ăn gì?','Ai còn online không?'],
+    };
+    const quick=quickByCh[_chatChannel]||quickByCh.chung;
+    const counts={};
+    CHAT_CHANNELS.forEach(c=>counts[c.id]=0);
+    (rows||[]).forEach(r=>{const id=r._ch||'chung';counts[id]=(counts[id]||0)+1});
+    const filtered=(rows||[]).filter(r=>(r._ch||'chung')===_chatChannel);
     let bodyHtml;
     if(loading){
       bodyHtml=`<div class="chat-empty"><div class="ico">💬</div><p>Đang tải tin nhắn...</p></div>`;
     }else if(!SB_OK()){
-      bodyHtml=`<div class="chat-empty"><div class="ico">📡</div><p style="color:#C62828">Chưa nối server<br><span style="font-weight:500;opacity:.8">Không tải được chat tổng</span></p></div>`;
-    }else if(!rows.length){
-      bodyHtml=`<div class="chat-empty"><div class="ico">🌸</div><p>Chưa có tin nhắn<br><span style="font-weight:500;opacity:.8">Hãy là người đầu tiên chào mọi người!</span></p></div>`;
+      bodyHtml=`<div class="chat-empty"><div class="ico">📡</div><p style="color:#C62828">Chưa nối server<br><span style="font-weight:500;opacity:.8">Không tải được chat nhóm</span></p></div>`;
+    }else if(!filtered.length){
+      bodyHtml=`<div class="chat-empty"><div class="ico">${chInfo.icon}</div><p>Kênh <b>${chInfo.name}</b> chưa có tin<br><span style="font-weight:500;opacity:.8">${chInfo.hint} — nhắn gì đi!</span></p></div>`;
     }else{
-      bodyHtml=rows.map(r=>{
+      bodyHtml=filtered.map(r=>{
         const mine=nick&&r.nick===nick;
         const tm=r.created_at?new Date(r.created_at).toLocaleTimeString('vi-VN',{hour:'2-digit',minute:'2-digit'}):'';
+        const txt=r._text!=null?r._text:r.message;
         return `<div class="chat-bubble ${mine?'me':'ai'}">
           <div class="who"><span>${mine?'Bạn':esc(r.nick||'???')}</span>${tm?`<span class="tm">${tm}</span>`:''}</div>
-          ${esc(r.message||'')}
+          ${esc(txt||'')}
         </div>`;
       }).join('');
     }
+    const chTabs=CHAT_CHANNELS.map(c=>`
+      <button type="button" class="chat-ch ${c.id===_chatChannel?'on':''}" data-ch="${c.id}">
+        ${c.icon} ${c.name}${counts[c.id]?`<span class="cnt">${counts[c.id]}</span>`:''}
+      </button>`).join('');
     modal.innerHTML=`<div class="box chat-box">
       <div class="chat-head">
-        <div class="av">💬</div>
+        <div class="av">${chInfo.icon}</div>
         <div class="tit">
-          <h2>Chat tổng</h2>
-          <div class="sub"><span class="live"><i></i> Online</span> · Không cần đăng nhập</div>
+          <h2>Chat nhóm</h2>
+          <div class="sub"><span class="live"><i></i> Online</span> · ${CHAT_CHANNELS.length} kênh</div>
         </div>
         <button type="button" class="xbtn" id="gc-close" title="Đóng">✕</button>
+      </div>
+      <div class="chat-channels">${chTabs}</div>
+      <div class="chat-meta-bar">
+        <span>Đang ở: <span class="ch-name">${chInfo.icon} ${chInfo.name}</span></span>
+        <span>${filtered.length} tin</span>
       </div>
       <div class="chat-nick-row">
         <input id="gc-nick" maxlength="16" placeholder="Tên hiển thị của bạn..." value="${(nick||'').replace(/"/g,'&quot;')}">
@@ -6643,7 +6717,7 @@ function openGlobalChat(){
       <div class="chat-log" id="gc-log">${bodyHtml}</div>
       ${nick?`<div class="chat-quick">${quick.map(q=>`<button type="button" data-q="${esc(q)}">${q}</button>`).join('')}</div>`:''}
       <div class="chat-input-row">
-        <input id="gc-msg" maxlength="120" placeholder="${nick?'Nhắn gì đó dễ thương...':'Đặt tên trước đã'}" ${nick?'':'disabled'} autocomplete="off">
+        <input id="gc-msg" maxlength="100" placeholder="${nick?'Nhắn trong #'+chInfo.name+'...':'Đặt tên trước đã'}" ${nick?'':'disabled'} autocomplete="off">
         <button type="button" class="send" id="gc-send" ${nick?'':'disabled'} title="Gửi">➤</button>
       </div>
     </div>`;
@@ -6658,6 +6732,13 @@ function openGlobalChat(){
       if(!setChatNick(v)){toast('Tên 1–16 ký tự');sfx('bad');return}
       sfx('quest');toast('Đã lưu tên: '+v);paint();
     };
+    document.querySelectorAll('.chat-ch[data-ch]').forEach(b=>{
+      b.onclick=()=>{
+        _chatChannel=b.dataset.ch;
+        sfx('click');
+        paint();
+      };
+    });
     const send=async(preset)=>{
       const inp=document.getElementById('gc-msg');
       const v=(preset||(inp&&inp.value)||'').trim();
@@ -6666,7 +6747,7 @@ function openGlobalChat(){
       const btn=document.getElementById('gc-send');
       if(btn)btn.disabled=true;
       if(inp)inp.value='';
-      const res=await sendGlobalChat(v);
+      const res=await sendGlobalChat(v,_chatChannel);
       if(!res.ok){
         toast((res.error&&res.error.message)||res.error||'Gửi lỗi — chạy SQL public_chat');
         sfx('bad');
